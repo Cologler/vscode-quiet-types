@@ -5,7 +5,6 @@ import * as vscode from 'vscode';
 import * as core from './core';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Congratulations, your extension "quiet-types" is now active!');
     new core.Context(context);
 }
 

@@ -4,28 +4,68 @@
 import * as vscode from 'vscode';
 import * as process from "child_process";
 
+const PACKAGE_NAME_PATTERN = '[\\w]+';
 const NPM_PACKAGE_NAME = 'package.json';
 const PACKAGES_NOT_EXISTS = new Set();
 
 abstract class PackageManager {
-    abstract install(packageName: string);
-    abstract getName();
+    protected existsPackageNames: Set<string> = null;
 
-    internalExecNpmCommand(packageName: string, command: string, cwd = null) {
-        let p = process.exec(command, { cwd : cwd }, (error, stdout, stderr) => {
-            if (error) {
-                if (stderr) {
-                    if (stderr.startsWith('npm ERR! code E404')) {
-                        PACKAGES_NOT_EXISTS.add(packageName);
-                        return;
+    abstract installAsync(packageName: string) : Promise<any>;
+    abstract getName();
+    abstract existsAsync(packageName: string) : Promise<boolean>;
+
+    _internalInstallAsync(packageName: string, command: string, cwd = null) : Promise<any> {
+        return new Promise((resolve, reject) => {
+            process.exec(command, { cwd : cwd }, (error, stdout, stderr) => {
+                if (error) {
+                    if (stderr) {
+                        if (stderr.startsWith('npm ERR! code E404')) {
+                            PACKAGES_NOT_EXISTS.add(packageName);
+                            return;
+                        }
+                    }
+
+                    console.log(error);
+                    console.log(stdout);
+                    console.log(stderr);
+                    reject();
+                } else {
+                    resolve();
+                }
+            });
+        });
+
+    }
+
+    _internalExistsAsync(packageName: string, command: string, options: any) : Promise<boolean> {
+        let self = this;
+        return new Promise<boolean>((resolve, reject) => {
+            if (self.existsPackageNames !== null) {
+                resolve(self.existsPackageNames.has(packageName));
+            }
+
+            process.exec(command, options, (error, stdout, stderr) => {
+                if (self.existsPackageNames === null) {
+                    self.existsPackageNames = new Set<string>();
+
+                    if (error) {
+                        console.log(error);
+                        console.log(stdout);
+                        console.log(stderr);
+                    } else {
+                        let lines = stdout.split('\n');
+                        let regex = new RegExp(`@types[\/\\\\](${PACKAGE_NAME_PATTERN})@.+$`);
+                        lines.forEach(z => {
+                            let m = z.match(regex);
+                            if (m) {
+                                self.existsPackageNames.add(m[1]);
+                            }
+                        })
                     }
                 }
-
-                console.log(error);
-                console.log(stdout);
-                console.log(stderr);
-            }
-            p.disconnect();
+                resolve(self.existsPackageNames.has(packageName));
+            });
         });
     }
 }
@@ -35,10 +75,14 @@ class GlobalPackageManager extends PackageManager {
         return 'global';
     }
 
-    install(packageName: string) {
+    existsAsync(packageName: string) : Promise<boolean> {
+        return this._internalExistsAsync(packageName, 'npm list -g --depth=0', {});
+    }
+
+    installAsync(packageName: string) : Promise<any> {
         //let command = `npm xxxxx`;
         let command = `npm install -g @types/${packageName} `;
-        this.internalExecNpmCommand(packageName, command);
+        return this._internalInstallAsync(packageName, command);
     }
 }
 
@@ -54,10 +98,14 @@ class LocalPackageManager extends PackageManager {
         return 'workspace';
     }
 
-    install(packageName: string) {
+    existsAsync(packageName: string) : Promise<boolean> {
+        return this._internalExistsAsync(packageName, 'npm list --depth=0', { cwd: this.workDir });
+    }
+
+    installAsync(packageName: string) : Promise<any> {
         //let command = `npm xxxxx`;
         let command = `npm install -save-dev @types/${packageName} `;
-        this.internalExecNpmCommand(packageName, command, this.workDir);
+        return this._internalInstallAsync(packageName, command, this.workDir);
     }
 }
 
@@ -66,29 +114,27 @@ export class Context {
     private extensionContext: vscode.ExtensionContext;
     private globalPackageManager: PackageManager = new GlobalPackageManager();
     private localPackageManager: PackageManager = null;
-    private dynamicLocalPackageManager: PackageManager = null; // become null when 'package.json' is not exists.
+    private packageExists: boolean = false; // become null when 'package.json' is not exists.
     private outputChanel: vscode.OutputChannel = null;
 
     constructor (context: vscode.ExtensionContext) {
-        console.log('xxxxxxxxxx');
+        console.log('fdfdfd');
         let self = this;
         this.extensionContext = context;
 
         if (vscode.workspace.rootPath) {
             this.localPackageManager = new LocalPackageManager(vscode.workspace.rootPath);
             vscode.workspace.findFiles(NPM_PACKAGE_NAME).then(z => {
-                if (z.length > 0) {
-                    self.dynamicLocalPackageManager = self.localPackageManager;
-                }
+                self.packageExists = z.length > 0;
             });
 
             let watcher = vscode.workspace.createFileSystemWatcher(
                 vscode.workspace.rootPath + '/' + NPM_PACKAGE_NAME, false, true, false);
             context.subscriptions.push(watcher.onDidCreate(z => {
-                self.dynamicLocalPackageManager = self.localPackageManager;
+                self.packageExists = true;
             }));
             context.subscriptions.push(watcher.onDidDelete(z => {
-                self.dynamicLocalPackageManager = null;
+                self.packageExists = false;
             }));
             context.subscriptions.push(watcher);
         }
@@ -100,6 +146,7 @@ export class Context {
             if (lastDocument === null || lastLineNumber === null) {
                 lastDocument = e.textEditor.document;
                 lastLineNumber = line.lineNumber;
+
             } else if (lastDocument !== e.textEditor.document || lastLineNumber !== line.lineNumber) {
                 let lastLine = e.textEditor.document.lineAt(lastLineNumber);
                 let content = e.textEditor.document.getText(lastLine.range);
@@ -108,6 +155,9 @@ export class Context {
                 lastLineNumber = line.lineNumber;
             }
         }));
+
+        this.localPackageManager.existsAsync('');
+        this.globalPackageManager.existsAsync('');
     }
 
     async onLineCompleted(content: string) {
@@ -116,16 +166,29 @@ export class Context {
             if (PACKAGES_NOT_EXISTS.has(packageName)) {
                 return;
             }
+
+            if (this.outputChanel === null) {
+                this.outputChanel = vscode.window.createOutputChannel("Quiet-Types");
+                this.extensionContext.subscriptions.push(this.outputChanel);
+            }
+
+            if (this.localPackageManager !== null && await this.localPackageManager.existsAsync(packageName)) {
+                this.outputChanel.appendLine(`@types/${packageName}> already exists in ${this.localPackageManager.getName()}.`);
+                return;
+            } else if (await this.globalPackageManager.existsAsync(packageName)) {
+                this.outputChanel.appendLine(`@types/<${packageName}> already exists in ${this.globalPackageManager.getName()}.`);
+                return;
+            }
+
             let packageManager = this.getPackageManager();
             if (packageManager) {
-                if (this.outputChanel === null) {
-                    this.outputChanel = vscode.window.createOutputChannel(
-                        "Quiet-Types"
-                    );
-                    this.extensionContext.subscriptions.push(this.outputChanel);
+                this.outputChanel.appendLine(`Installing @types/<${packageName}> to ${packageManager.getName()}.`);
+                try {
+                    await packageManager.installAsync(packageName);
+                    this.outputChanel.appendLine(`@types/<${packageName}> Installed.`);
+                } catch (err) {
+                    this.outputChanel.appendLine(`@types/<${packageName}> install occur error.`);
                 }
-                this.outputChanel.appendLine(`Installing <${packageName}> to ${packageManager.getName()}.`)
-                packageManager.install(packageName);
             }
         }
     }
@@ -139,7 +202,7 @@ export class Context {
             case "workspace":
                 return this.localPackageManager;
             case "auto":
-                return this.dynamicLocalPackageManager || this.globalPackageManager;
+                return this.packageExists ? this.localPackageManager : this.globalPackageManager;
             default:
                 return this.localPackageManager;
         }
@@ -152,9 +215,8 @@ export class Context {
             packageName = name;
         }
 
-        const packageNamePattern = '[\\w]+';
-        let match = content.match(new RegExp(`require\\('(${packageNamePattern})'\\);?$`)) ||
-                    content.match(new RegExp(`require\\("(${packageNamePattern})"\\);?$`));
+        let match = content.match(new RegExp(`require\\('(${PACKAGE_NAME_PATTERN})'\\);?$`)) ||
+                    content.match(new RegExp(`require\\("(${PACKAGE_NAME_PATTERN})"\\);?$`));
         if (match) {
             try {
                 eval(match[0]);
@@ -166,8 +228,8 @@ export class Context {
         // import * as vscode from 'vscode';
         // import { LogLevel, ILogger, Logger } from './utils/logger';
 
-        match = content.match(new RegExp(`^import .+ from '(${packageNamePattern})';?$`)) ||
-                content.match(new RegExp(`^import .+ from "(${packageNamePattern})";?$`));
+        match = content.match(new RegExp(`^import .+ from '(${PACKAGE_NAME_PATTERN})';?$`)) ||
+                content.match(new RegExp(`^import .+ from "(${PACKAGE_NAME_PATTERN})";?$`));
         if (match) {
             return match[1];
         }
