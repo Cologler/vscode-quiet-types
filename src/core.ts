@@ -118,7 +118,6 @@ export class Context {
     private outputChanel: vscode.OutputChannel = null;
 
     constructor (context: vscode.ExtensionContext) {
-        console.log('fdfdfd');
         let self = this;
         this.extensionContext = context;
 
