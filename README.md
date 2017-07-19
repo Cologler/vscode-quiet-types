@@ -1,7 +1,5 @@
 # quiet-types README
 
-This is the README for your extension "quiet-types". After writing up a brief description, we recommend including the following sections.
-
 ## Features
 
 **This is the preview release.**
