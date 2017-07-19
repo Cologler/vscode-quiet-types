@@ -1,7 +1,7 @@
 {
     "name": "quiet-types",
     "displayName": "quiet-types",
-    "description": "",
+    "description": "quiet install @types for typescript and javascript by detect require() and `import * from *`.",
     "version": "0.0.1",
     "publisher": "cologler",
     "engines": {
