@@ -8,12 +8,14 @@ const PACKAGE_NAME_PATTERN = '[\\w]+';
 const NPM_PACKAGE_NAME = 'package.json';
 const PACKAGES_NOT_EXISTS = new Set();
 
+
 abstract class PackageManager {
     protected existsPackageNames: Set<string> = null;
+    private _loadExistsPackageNamesPromise: Promise<any> = null;
 
     abstract installAsync(packageName: string) : Promise<any>;
     abstract getName();
-    abstract existsAsync(packageName: string) : Promise<boolean>;
+    abstract BeginLoadPackages();
 
     _internalInstallAsync(packageName: string, command: string, cwd = null) : Promise<any> {
         return new Promise((resolve, reject) => {
@@ -31,58 +33,58 @@ abstract class PackageManager {
                     console.log(stderr);
                     reject();
                 } else {
+                    this.existsPackageNames.add(packageName);
                     resolve();
                 }
             });
         });
-
     }
 
-    _internalExistsAsync(packageName: string, command: string, options: any) : Promise<boolean> {
+    _internalBeginLoadPackages(command: string, options: any) {
         let self = this;
-        return new Promise<boolean>((resolve, reject) => {
-            if (self.existsPackageNames !== null) {
-                resolve(self.existsPackageNames.has(packageName));
-            }
-
+        this._loadExistsPackageNamesPromise = new Promise((resolve, reject) => {
             process.exec(command, options, (error, stdout, stderr) => {
-                if (self.existsPackageNames === null) {
-                    self.existsPackageNames = new Set<string>();
-
-                    if (error) {
-                        console.log(error);
-                        console.log(stdout);
-                        console.log(stderr);
-                    } else {
-                        let lines = stdout.split('\n');
-                        let regex = new RegExp(`@types[\/\\\\](${PACKAGE_NAME_PATTERN})@.+$`);
-                        lines.forEach(z => {
-                            let m = z.match(regex);
-                            if (m) {
-                                self.existsPackageNames.add(m[1]);
-                            }
-                        })
-                    }
+                self.existsPackageNames = new Set<string>();
+                if (error) {
+                    console.log(error);
+                    console.log(stdout);
+                    console.log(stderr);
+                } else {
+                    let lines = stdout.split('\n');
+                    let regex = new RegExp(`@types[\/\\\\](${PACKAGE_NAME_PATTERN})@.+$`);
+                    lines.forEach(z => {
+                        let m = z.match(regex);
+                        if (m) {
+                            self.existsPackageNames.add(m[1]);
+                        }
+                    })
                 }
-                resolve(self.existsPackageNames.has(packageName));
+                resolve();
             });
         });
+    }
+
+    async isExistsAsync(packageName: string) {
+        if (this.existsPackageNames === null) {
+            await this._loadExistsPackageNamesPromise;
+        }
+        return this.existsPackageNames.has(packageName);
     }
 }
 
 class GlobalPackageManager extends PackageManager {
     getName() {
-        return 'global';
-    }
-
-    existsAsync(packageName: string) : Promise<boolean> {
-        return this._internalExistsAsync(packageName, 'npm list -g --depth=0', {});
+        return 'Global';
     }
 
     installAsync(packageName: string) : Promise<any> {
         //let command = `npm xxxxx`;
         let command = `npm install -g @types/${packageName} `;
         return this._internalInstallAsync(packageName, command);
+    }
+
+    BeginLoadPackages() {
+        this._internalBeginLoadPackages('npm list -g --depth=0', {});
     }
 }
 
@@ -95,17 +97,17 @@ class LocalPackageManager extends PackageManager {
     }
 
     getName() {
-        return 'workspace';
-    }
-
-    existsAsync(packageName: string) : Promise<boolean> {
-        return this._internalExistsAsync(packageName, 'npm list --depth=0', { cwd: this.workDir });
+        return 'Workspace';
     }
 
     installAsync(packageName: string) : Promise<any> {
         //let command = `npm xxxxx`;
         let command = `npm install -save-dev @types/${packageName} `;
         return this._internalInstallAsync(packageName, command, this.workDir);
+    }
+
+    BeginLoadPackages() {
+        this._internalBeginLoadPackages('npm list --depth=0', { cwd: this.workDir });
     }
 }
 
@@ -155,8 +157,9 @@ export class Context {
             }
         }));
 
-        this.localPackageManager.existsAsync('');
-        this.globalPackageManager.existsAsync('');
+        this.localPackageManager.BeginLoadPackages();
+        this.globalPackageManager.BeginLoadPackages();
+        console.log('end init.');
     }
 
     async onLineCompleted(content: string) {
@@ -170,24 +173,34 @@ export class Context {
                 this.outputChanel = vscode.window.createOutputChannel("Quiet-Types");
                 this.extensionContext.subscriptions.push(this.outputChanel);
             }
+            let output = this.outputChanel;
 
-            if (this.localPackageManager !== null && await this.localPackageManager.existsAsync(packageName)) {
-                this.outputChanel.appendLine(`@types/${packageName}> already exists in ${this.localPackageManager.getName()}.`);
-                return;
-            } else if (await this.globalPackageManager.existsAsync(packageName)) {
-                this.outputChanel.appendLine(`@types/<${packageName}> already exists in ${this.globalPackageManager.getName()}.`);
+            async function checkExistsAsync(packageManager: PackageManager) {
+                if (packageManager !== null && await packageManager.isExistsAsync(packageName)) {
+                    output.appendLine(`${packageManager.getName()}: @types/${packageName}> already installed.`);
+                    return true;
+                }
+                return false;
+            }
+
+            if (await checkExistsAsync(this.localPackageManager) || await checkExistsAsync(this.globalPackageManager)) {
                 return;
             }
 
             let packageManager = this.getPackageManager();
             if (packageManager) {
-                this.outputChanel.appendLine(`Installing @types/<${packageName}> to ${packageManager.getName()}.`);
+                let disposable = vscode.window.setStatusBarMessage(
+                    `Installing @types/<${packageName}> to ${packageManager.getName()}.`, 10000
+                );
+                this.extensionContext.subscriptions.push(disposable);
+
                 try {
                     await packageManager.installAsync(packageName);
-                    this.outputChanel.appendLine(`@types/<${packageName}> Installed.`);
+                    output.appendLine(`${packageManager.getName()}: @types/<${packageName}> installed.`);
                 } catch (err) {
-                    this.outputChanel.appendLine(`@types/<${packageName}> install occur error.`);
+                    output.appendLine(`${packageManager.getName()}: @types/<${packageName}> install occur error.`);
                 }
+                disposable.dispose();
             }
         }
     }
